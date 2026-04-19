@@ -33,6 +33,14 @@ inputs:
     description: "Pod completion timeout in seconds"
     required: false
     default: "600"
+  docker-secret-name:
+    description: "K8s Secret name containing Docker config"
+    required: false
+    default: "docker-config"
+  docker-secret-key:
+    description: "Key in the Docker config Secret"
+    required: false
+    default: "config.json"
 
 runs:
   using: "composite"
@@ -48,6 +56,8 @@ runs:
         INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
         INPUT_KANIKO_IMAGE: ${{ inputs.kaniko-image }}
         INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_DOCKER_SECRET_NAME: ${{ inputs.docker-secret-name }}
+        INPUT_DOCKER_SECRET_KEY: ${{ inputs.docker-secret-key }}
         GIT_TOKEN: ${{ github.token }}
         POD_NAME: "kaniko-${{ github.run_id }}-${{ github.run_attempt }}"
       run: |
@@ -124,7 +134,11 @@ runs:
                 "volumes": [{
                     "name": "docker-config",
                     "secret": {
-                        "secretName": "docker-config",
+                        "secretName": os.environ["INPUT_DOCKER_SECRET_NAME"],
+                        "items": [{
+                            "key": os.environ["INPUT_DOCKER_SECRET_KEY"],
+                            "path": "config.json",
+                        }],
                     },
                 }],
             },
