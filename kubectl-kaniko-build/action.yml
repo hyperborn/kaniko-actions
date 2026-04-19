@@ -41,6 +41,9 @@ inputs:
     description: "Key in the Docker config Secret"
     required: false
     default: "config.json"
+  git-token:
+    description: "Token for authenticating git clone in kaniko (e.g. GITHUB_TOKEN)"
+    required: true
 
 runs:
   using: "composite"
@@ -58,7 +61,7 @@ runs:
         INPUT_TIMEOUT: ${{ inputs.timeout }}
         INPUT_DOCKER_SECRET_NAME: ${{ inputs.docker-secret-name }}
         INPUT_DOCKER_SECRET_KEY: ${{ inputs.docker-secret-key }}
-        GIT_TOKEN: ${{ github.token }}
+        GIT_TOKEN: ${{ inputs.git-token }}
         POD_NAME: "kaniko-${{ github.run_id }}-${{ github.run_attempt }}"
       run: |
         set -euo pipefail
