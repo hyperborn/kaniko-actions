@@ -117,10 +117,16 @@ runs:
                     "name": "kaniko",
                     "image": os.environ["INPUT_KANIKO_IMAGE"],
                     "args": args,
-                    "env": [{
-                        "name": "GIT_TOKEN",
-                        "value": os.environ["GIT_TOKEN"],
-                    }],
+                    "env": [
+                        {
+                            "name": "GIT_TOKEN",
+                            "value": os.environ["GIT_TOKEN"],
+                        },
+                        {
+                            "name": "GIT_USERNAME",
+                            "value": "x-access-token",
+                        },
+                    ],
                     "resources": {
                         "requests": {"cpu": "500m", "memory": "1Gi"},
                         "limits":   {"cpu": "2",    "memory": "4Gi"},
