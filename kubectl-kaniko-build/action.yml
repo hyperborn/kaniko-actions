@@ -1,0 +1,200 @@
+name: "kubectl-kaniko-build"
+description: "Build and push container images using kaniko in a separate K8s Pod via curl"
+
+inputs:
+  context:
+    description: "Build context"
+    required: false
+    default: "git://github.com/${{ github.repository }}"
+  dockerfile:
+    description: "Dockerfile path"
+    required: false
+    default: "Dockerfile"
+  target:
+    description: "Build target stage"
+    required: false
+    default: ""
+  destinations:
+    description: "Push destinations (newline-separated)"
+    required: true
+  build-args:
+    description: "Build arguments (newline-separated)"
+    required: false
+    default: ""
+  extra-args:
+    description: "Extra kaniko arguments (newline-separated)"
+    required: false
+    default: ""
+  kaniko-image:
+    description: "kaniko executor image"
+    required: false
+    default: "gcr.io/kaniko-project/executor:v1.23.2-debug"
+  timeout:
+    description: "Pod completion timeout in seconds"
+    required: false
+    default: "600"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run kaniko build in K8s Pod
+      shell: bash
+      env:
+        INPUT_CONTEXT: ${{ inputs.context }}
+        INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_DESTINATIONS: ${{ inputs.destinations }}
+        INPUT_BUILD_ARGS: ${{ inputs.build-args }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+        INPUT_KANIKO_IMAGE: ${{ inputs.kaniko-image }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        GIT_TOKEN: ${{ github.token }}
+        POD_NAME: "kaniko-${{ github.run_id }}-${{ github.run_attempt }}"
+      run: |
+        set -euo pipefail
+
+        # ── K8s API connection ──────────────────────────────────────
+        SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
+        SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+        K8S_API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+        SA_TOKEN=$(cat "$SA_TOKEN_PATH")
+
+        kube_curl() {
+          curl -sfS --cacert "$SA_CA_PATH" \
+            -H "Authorization: Bearer ${SA_TOKEN}" \
+            "$@"
+        }
+
+        # ── Build Pod manifest via Python ───────────────────────────
+        POD_JSON=$(python3 << 'PYEOF'
+        import json, os
+
+        # Build kaniko args
+        args = []
+        args.append("--context=" + os.environ["INPUT_CONTEXT"])
+        args.append("--dockerfile=" + os.environ["INPUT_DOCKERFILE"])
+
+        target = os.environ.get("INPUT_TARGET", "").strip()
+        if target:
+            args.append("--target=" + target)
+
+        for dest in os.environ["INPUT_DESTINATIONS"].strip().splitlines():
+            dest = dest.strip()
+            if dest:
+                args.append("--destination=" + dest)
+
+        for ba in os.environ.get("INPUT_BUILD_ARGS", "").strip().splitlines():
+            ba = ba.strip()
+            if ba:
+                args.append("--build-arg=" + ba)
+
+        for ea in os.environ.get("INPUT_EXTRA_ARGS", "").strip().splitlines():
+            ea = ea.strip()
+            if ea:
+                args.append(ea)
+
+        # Build pod manifest
+        pod = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": os.environ["POD_NAME"],
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [{
+                    "name": "kaniko",
+                    "image": os.environ["INPUT_KANIKO_IMAGE"],
+                    "args": args,
+                    "env": [{
+                        "name": "GIT_TOKEN",
+                        "value": os.environ["GIT_TOKEN"],
+                    }],
+                    "resources": {
+                        "requests": {"cpu": "500m", "memory": "1Gi"},
+                        "limits":   {"cpu": "2",    "memory": "4Gi"},
+                    },
+                    "volumeMounts": [{
+                        "name": "docker-config",
+                        "mountPath": "/kaniko/.docker",
+                        "readOnly": True,
+                    }],
+                }],
+                "volumes": [{
+                    "name": "docker-config",
+                    "secret": {
+                        "secretName": "docker-config",
+                    },
+                }],
+            },
+        }
+        print(json.dumps(pod))
+        PYEOF
+        )
+
+        # ── Create Pod ──────────────────────────────────────────────
+        echo "::group::Creating kaniko Pod: ${POD_NAME}"
+        kube_curl -X POST \
+          "${K8S_API}/api/v1/namespaces/${NAMESPACE}/pods" \
+          -H "Content-Type: application/json" \
+          -d "$POD_JSON" \
+          -o /dev/null
+        echo "Pod created."
+        echo "::endgroup::"
+
+        # ── Cleanup trap ────────────────────────────────────────────
+        cleanup() {
+          echo "::group::Cleaning up Pod ${POD_NAME}"
+          kube_curl -X DELETE \
+            "${K8S_API}/api/v1/namespaces/${NAMESPACE}/pods/${POD_NAME}" \
+            -o /dev/null 2>/dev/null || true
+          echo "Pod deleted."
+          echo "::endgroup::"
+        }
+        trap cleanup EXIT
+
+        # ── Wait for container to start ─────────────────────────────
+        echo "Waiting for Pod to start..."
+        DEADLINE=$((SECONDS + INPUT_TIMEOUT))
+        while true; do
+          if (( SECONDS >= DEADLINE )); then
+            echo "::error::Timed out waiting for Pod to start"
+            exit 1
+          fi
+          PHASE=$(kube_curl "${K8S_API}/api/v1/namespaces/${NAMESPACE}/pods/${POD_NAME}" \
+            | jq -r '.status.phase')
+          case "$PHASE" in
+            Running|Succeeded|Failed) break ;;
+          esac
+          sleep 2
+        done
+
+        # ── Stream logs ─────────────────────────────────────────────
+        echo "::group::kaniko build logs"
+        kube_curl "${K8S_API}/api/v1/namespaces/${NAMESPACE}/pods/${POD_NAME}/log?follow=true&container=kaniko" \
+          || true
+        echo ""
+        echo "::endgroup::"
+
+        # ── Wait for completion ─────────────────────────────────────
+        echo "Waiting for Pod to complete..."
+        while true; do
+          if (( SECONDS >= DEADLINE )); then
+            echo "::error::Timed out waiting for Pod to complete"
+            exit 1
+          fi
+          PHASE=$(kube_curl "${K8S_API}/api/v1/namespaces/${NAMESPACE}/pods/${POD_NAME}" \
+            | jq -r '.status.phase')
+          case "$PHASE" in
+            Succeeded)
+              echo "Build succeeded."
+              exit 0
+              ;;
+            Failed)
+              echo "::error::kaniko build failed"
+              exit 1
+              ;;
+          esac
+          sleep 3
+        done
