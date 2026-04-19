@@ -120,6 +120,21 @@ runs:
             },
             "spec": {
                 "restartPolicy": "Never",
+                "initContainers": [{
+                    "name": "setup-git-creds",
+                    "image": os.environ["INPUT_KANIKO_IMAGE"],
+                    "command": ["/busybox/sh", "-c",
+                        "echo 'machine github.com\nlogin x-access-token\npassword '\"$GIT_TOKEN\" > /kaniko/.netrc && chmod 600 /kaniko/.netrc"
+                    ],
+                    "env": [{
+                        "name": "GIT_TOKEN",
+                        "value": os.environ["GIT_TOKEN"],
+                    }],
+                    "volumeMounts": [{
+                        "name": "kaniko-data",
+                        "mountPath": "/kaniko",
+                    }],
+                }],
                 "containers": [{
                     "name": "kaniko",
                     "image": os.environ["INPUT_KANIKO_IMAGE"],
@@ -138,22 +153,36 @@ runs:
                         "requests": {"cpu": "500m", "memory": "1Gi"},
                         "limits":   {"cpu": "2",    "memory": "4Gi"},
                     },
-                    "volumeMounts": [{
-                        "name": "docker-config",
-                        "mountPath": "/kaniko/.docker",
-                        "readOnly": True,
-                    }],
+                    "volumeMounts": [
+                        {
+                            "name": "docker-config",
+                            "mountPath": "/kaniko/.docker",
+                            "readOnly": True,
+                        },
+                        {
+                            "name": "kaniko-data",
+                            "mountPath": "/kaniko/.netrc",
+                            "subPath": ".netrc",
+                            "readOnly": True,
+                        },
+                    ],
                 }],
-                "volumes": [{
-                    "name": "docker-config",
-                    "secret": {
-                        "secretName": os.environ["INPUT_DOCKER_SECRET_NAME"],
-                        "items": [{
-                            "key": os.environ["INPUT_DOCKER_SECRET_KEY"],
-                            "path": "config.json",
-                        }],
+                "volumes": [
+                    {
+                        "name": "kaniko-data",
+                        "emptyDir": {},
                     },
-                }],
+                    {
+                        "name": "docker-config",
+                        "secret": {
+                            "secretName": os.environ["INPUT_DOCKER_SECRET_NAME"],
+                            "items": [{
+                                "key": os.environ["INPUT_DOCKER_SECRET_KEY"],
+                                "path": "config.json",
+                            }],
+                        },
+                    },
+                ],
             },
         }
         print(json.dumps(pod))
